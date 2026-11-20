@@ -1,4 +1,4 @@
-/* Pikniktüp v1.7.1 — server-side YouTube/Invidious discovery gateway.
+/* Pikniktüp v1.7.2 — server-side YouTube/Invidious discovery gateway.
  * Preserves the v1.6 frontend contract: /api/youtube?category=&search=&pageToken=&id=.
  * Search defaults to Invidious; the official YouTube API is used for trending / details.
  * No API key is ever returned to the browser or forwarded to Invidious.
@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const VERSION = '1.7.1';
+const VERSION = '1.7.2';
 const YOUTUBE_API = 'https://www.googleapis.com/youtube/v3/';
 const OFFICIAL_INSTANCES = [
   'https://inv.nadeko.net',
@@ -36,11 +36,13 @@ const SEARCH_TERMS = Object.freeze({
 const ID_OK = /^[A-Za-z0-9_-]{11}$/;
 const YT_TOKEN_OK = /^[A-Za-z0-9_-]{1,180}$/;
 const INV_TOKEN_OK = /^iv_([1-9][0-9]{0,2})$/;
+const YT_PREFIX_TOKEN_OK = /^yt_([A-Za-z0-9_-]{1,180})$/;
 const STATIC_AUDIO = /(official\s*audio|audio\s*only|lyric(?:s)?\s*video|sözleri|visuali[sz]er|\btopic\b|full\s*album|albümün\s*tamamı)/i;
 const CACHE_MAX = 180;
 const cache = new Map();
 const inflight = new Map();
 const hostCooldown = new Map();
+let officialSearchBlockedUntil = 0;
 
 const cut = (v, length=200) => String(v ?? '').slice(0, length);
 const finite = n => Math.max(0, Math.min(1e12, Number.isFinite(Number(n)) ? Number(n) : 0));
@@ -227,6 +229,57 @@ async function officialTrending(category, pageToken, key) {
   return {items, has_more: Boolean(data.nextPageToken),next_page_token: data.nextPageToken || '',source:'YouTube',category};
 }
 
+// Fallback is an officially supported endpoint. It is quota-limited, and must
+// never run on each keypress. The frontend submits only on Enter.
+async function officialSearch(term, category, pageToken, key) {
+  if (Date.now() < officialSearchBlockedUntil) {
+    throw apiError('Resmî YouTube arama kotası geçici olarak doldu.', 'YOUTUBE_SEARCH_LIMIT', 429,
+      Math.max(60, Math.ceil((officialSearchBlockedUntil - Date.now()) / 1000)));
+  }
+  const params = {part:'snippet', type:'video', q:term, maxResults:'24', regionCode:'TR',
+    relevanceLanguage:'tr', safeSearch:'strict', videoEmbeddable:'true', videoSyndicated:'true'};
+  if (category === 'Klipler' || category === 'Canlı') params.videoCategoryId = '10';
+  if (category === 'Shorts') params.videoDuration = 'short';
+  if (pageToken) params.pageToken = pageToken;
+  let results;
+  try {
+    results = await ytFetch('search', params, key);
+  } catch (error) {
+    if ([403,429].includes(error.status)) {
+      // Block repeated expensive calls for a while; serverless memory is best-effort.
+      officialSearchBlockedUntil = Date.now() + 60 * 60 * 1000;
+      throw apiError('YouTube arama kotası veya erişim sınırı', 'YOUTUBE_SEARCH_LIMIT', 429, 3600);
+    }
+    throw error;
+  }
+  const ids = [...new Set((results.items || []).map(item => item?.id?.videoId).filter(isId))];
+  if (!ids.length) return {items:[], has_more:false, next_page_token:'', source:'YouTube', category};
+  const details = await ytFetch('videos', {part:'snippet,contentDetails,statistics,status',
+    id:ids.join(','), maxResults:String(ids.length)}, key);
+  const byId = new Map((details.items || []).map(fromYouTube).filter(Boolean).map(item => [item.youtube_id, item]));
+  const items = normalizeResults(ids.map(id => byId.get(id)).filter(Boolean), category);
+  const more = results.nextPageToken && YT_TOKEN_OK.test(results.nextPageToken);
+  return {items, has_more:Boolean(more), next_page_token:more?`yt_${results.nextPageToken}`:'', source:'YouTube',category};
+}
+async function resilientSearch(term, category, pageToken, key) {
+  const yt = YT_PREFIX_TOKEN_OK.exec(pageToken);
+  if (yt) {
+    if (!key) throw apiError('YouTube API anahtarı eksik', 'YOUTUBE_SEARCH_LIMIT', 503);
+    return officialSearch(term,category,yt[1],key);
+  }
+  if (pageToken && !INV_TOKEN_OK.test(pageToken)) {
+    // Old tokens cannot be mapped safely between providers.
+    throw apiError('Eski arama sayfası belirteci', 'INVALID_PAGE', 400);
+  }
+  try {
+    return await invidiousSearch(term,category,pageForInvidious(pageToken));
+  } catch (invidiousError) {
+    if (pageToken || !key) throw invidiousError;
+    console.warn('[Pikniktup] Invidious search failed, trying official API once:', invidiousError.code || 'network');
+    return officialSearch(term,category,'',key);
+  }
+}
+
 function readCache(key) {
   const entry = cache.get(key);
   if (!entry) return null;
@@ -252,7 +305,7 @@ async function cached(key, loader, seconds=600) {
   return promise;
 }
 function respondError(res, error) {
-  const known = new Set(['INVIDIOUS_UNAVAILABLE','INVIDIOUS_NOT_CONFIGURED','INVIDIOUS_RATE_LIMIT','VIDEO_SOURCE_UNAVAILABLE']);
+  const known = new Set(['INVIDIOUS_UNAVAILABLE','INVIDIOUS_NOT_CONFIGURED','INVIDIOUS_RATE_LIMIT','YOUTUBE_SEARCH_LIMIT','VIDEO_SOURCE_UNAVAILABLE']);
   const code = known.has(error.code) || error.code === 'INVALID_PAGE' ? error.code : 'VIDEO_SOURCE_UNAVAILABLE';
   const wait = Math.max(0, Math.min(600, Math.ceil(error.wait || 0)));
   const status = error.status === 400 ? 400 : error.status === 429 ? 429 : 503;
@@ -260,7 +313,7 @@ function respondError(res, error) {
   res.setHeader('Cache-Control', 'no-store');
   console.warn('[Pikniktup] API request failed:', error.code || 'network', error.status || '');
   return res.status(status).json({
-    error: code === 'INVALID_PAGE' ? 'Sayfa belirteci eski veya geçersiz. İlk sayfaya dön.' : code === 'INVIDIOUS_NOT_CONFIGURED'
+    error: code === 'YOUTUBE_SEARCH_LIMIT' ? 'Invidious araması yanıt vermiyor; YouTube arama kotası da dolmuş veya sınırlandırılmış. Kotanın yenilenmesini bekleyebilirsin.' : code === 'INVALID_PAGE' ? 'Sayfa belirteci eski veya geçersiz. İlk sayfaya dön.' : code === 'INVIDIOUS_NOT_CONFIGURED'
       ? 'Arama sunucusu ayarlanmamış. Vercel INVIDIOUS_INSTANCES ayarını kontrol et.'
       : 'Video kaynağı şu anda yanıt vermiyor. Biraz sonra yeniden dene.',
     code, retry_after_seconds: wait
@@ -274,7 +327,7 @@ module.exports = async function handler(req, res) {
   }
   if (req.query?.health === '1') {
     res.setHeader('Cache-Control','no-store');
-    return res.status(200).json({version:VERSION, engine:'Invidious search + YouTube trending',invidiousConfigured:instances().length > 0,youtubeKeyConfigured:Boolean(process.env.YOUTUBE_API_KEY)});
+    return res.status(200).json({version:VERSION, engine:'Invidious search + official YouTube fallback + YouTube trending',invidiousConfigured:instances().length > 0,youtubeKeyConfigured:Boolean(process.env.YOUTUBE_API_KEY)});
   }
   const query = req.query || {};
   const id = query.id;
@@ -285,21 +338,19 @@ module.exports = async function handler(req, res) {
   if (requestedSearch !== undefined && search.length < 2) return res.status(400).json({error:'En az iki karakter yaz',code:'SEARCH_TOO_SHORT'});
   const category = typeof query.category === 'string' && (CATEGORIES[query.category] || SPECIAL.has(query.category)) ? query.category : 'Karışık';
   const pageToken = typeof query.pageToken === 'string' ? query.pageToken : '';
-  if (query.pageToken !== undefined && (!pageToken || (!INV_TOKEN_OK.test(pageToken) && !YT_TOKEN_OK.test(pageToken)))) {
+  if (query.pageToken !== undefined && (!pageToken || (!INV_TOKEN_OK.test(pageToken) && !YT_PREFIX_TOKEN_OK.test(pageToken) && !YT_TOKEN_OK.test(pageToken)))) {
     return res.status(400).json({error:'Geçersiz sayfa belirteci',code:'INVALID_PAGE'});
   }
   // CDN caching is cross-invocation; the in-process cache additionally coalesces concurrent requests.
   res.setHeader('Cache-Control','public, s-maxage=600, stale-while-revalidate=1800');
   const key = process.env.YOUTUBE_API_KEY;
-  const mode = id ? 'details' : search || SPECIAL.has(category) || category === 'Film/Dizi' || INV_TOKEN_OK.test(pageToken) ? 'search' : 'trending';
+  const mode = id ? 'details' : search || SPECIAL.has(category) || category === 'Film/Dizi' || INV_TOKEN_OK.test(pageToken) || YT_PREFIX_TOKEN_OK.test(pageToken) ? 'search' : 'trending';
   const cacheKey = JSON.stringify([mode,id||'',search,category,pageToken]);
   try {
     const {payload,cache:cacheLabel} = await cached(cacheKey, async () => {
       if (mode === 'search') {
         const term = userSearchTerm(search,category);
-        if (INV_TOKEN_OK.test(pageToken) || !pageToken) return invidiousSearch(term,category,pageForInvidious(pageToken));
-        // Search pagination from old Google versions is unsupported after migration.
-        throw apiError('Eski arama sayfası belirteci', 'INVALID_PAGE',400);
+        return resilientSearch(term,category,pageToken,key);
       }
       if (mode === 'details') {
         if (key) {
