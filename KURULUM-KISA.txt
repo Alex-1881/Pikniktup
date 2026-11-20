@@ -1,0 +1,12 @@
+PIKNIKTUP v1.7.1
+
+1) Zip'i aç, içindeki her şeyi GitHub'daki repo köküne yükle.
+2) GitHub'ın mevcut dosyaları değiştirme onayını ver.
+3) Vercel'de Deployments -> Redeploy.
+4) /api/youtube?health=1 ac: version 1.7.1 olmali.
+5) Sitede lvbel c5 yaz ve Enter'a bas.
+
+YOUTUBE_API_KEY Vercel ortam degiskeninde kalmali.
+INVIDIOUS_INSTANCES: istege bagli; kendi sunucun varsa HTTPS temel adresleri virgul ile ayir.
+
+UYARI: Herkese acik Invidious sunuculari hicbir zaman %100 garanti degildir.

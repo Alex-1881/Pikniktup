@@ -1,24 +1,33 @@
-# Pikniktüp v1.6 — PEAK / YouTube-klip odaklı sade arayüz
+# Pikniktüp v1.7.1 — Daha sağlam arama
 
-## Neler değişti?
+Pikniktüp v1.6'nın görünümünü ve özelliklerini koruyan yükseltme. **Arama Invidious üzerinden yapılır**, ana sayfa popüler videoları ve ayrıntılar için ise (yapılandırılmışsa) resmî **YouTube Data API v3** kullanılır. Video oynatma yine resmî YouTube gömme oynatıcısıyladır.
 
-- Ana sayfa sade: Büyük tanıtım/keşif kutuları, çift kategori sırası, gereksiz pazarlama yazıları ve 4 tanıtım videosu ana akıştan çıkarıldı. Girişte gerçek YouTube video kartları ve tek kategori çubuğu görünür.
-- **Resmî klipler**: YouTube Data API araması müzik videosu odaklıdır; başlığında "official audio", "lyrics", "Topic", "visualizer" vb. olanları filtrelemeye çalışır. **Bu bir garanti değildir**: YouTube API'si videonun gerçekten klip olduğunu otomatik doğrulayamaz.
-- **Canlı müzik**: Canlı performans/konser araması; **Tüm şarkılar**: kapak görselli YouTube Music kayıtları da dahil olmak üzere müzik kategorisi.
-- YouTube trend, komedi, dizi/film, oyun, eğlence, teknoloji, spor, eğitim, yaşam aramaları ve video kartları.
-- YouTube Shorts keşfi eklenmiştir; Pikniktüp'e yüklenen Shorts videoları alt bölümde korunmuştur.
-- Yerel Pikniktüp yüklemeleri ana sayfada ancak **gerçek kullanıcı videosu varsa** ayrı bölüm olarak görünür. Demo videoları artık ana akışı doldurmaz.
-- 60 tema, Pikniktüp yerel video yükleme, izleme, hesap, kullanıcı profili, OWNER, geçmiş, kaydedilenler ve arama korunmuştur.
-- YouTube içeriği YouTube'un resmî gömülü oynatıcısında açılır; YouTube uygulamasının kendisi değildir. Telif/reklam politikaları ve gömme kısıtlamaları geçerlidir.
+## En hızlı kurulum
 
-## Yayınlama: Yanlış sürüm sorunu yaşamamak için
+1. ZIP'i aç. İçindeki **dosyaların tamamını** GitHub'daki mevcut `piknik_tube` deposunun ana dizinine yükle. Üstüne yazmak istediğinde onayla. Mevcut depoyu silmene gerek yok.
+2. Vercel'de projenin **Settings → Environment Variables** bölümünü aç. Eskiden kullandığın `YOUTUBE_API_KEY`, `SUPABASE_URL` ve `SUPABASE_ANON_KEY` değişkenlerini aynı şekilde bırak. **Anahtarları `index.html` içine yazma.**
+3. **INVIDIOUS_INSTANCES isteğe bağlıdır.** Ayarlamazsan bu sürüm, Invidious'un resmî olarak listelenen dört genel HTTPS sunucusunu dener. Kendi erişilebilir sunucun varsa örneğin `https://senin-invidious-sunucun.example` biçiminde; birden çoksa virgülle ayırarak bu değişkene yazabilirsin. Sadece kök adresleri kullan; `/api/v1` ekleme.
+4. Vercel'de **Deployments → Redeploy** yap (veya GitHub'a yeni commit göndererek otomatik dağıtım yapılmasını bekle).
+5. `https://SITEN.vercel.app/api/youtube?health=1` sayfasında `version: 1.7.1` gör. Ardından normal sitede `lvbel c5` arayıp **Enter** veya arama simgesine bas.
 
-1. ZIP'i aç. GitHub `Alex-1881/piknik_tube` deposunun **kök dizinine** ZIP'in içeriğini yükle; özellikle `index.html`, `version.txt`, `api/youtube.js`, `api/status.js` ve `vercel.json` dosyalarını güncelle.
-2. GitHub'da Commit changes yap. Vercel'de yeni commit'e bağlı Ready deployment'ı aç; gerekiyorsa **Promote to Production** seç. Eski deployment'a Redeploy basmak eski sürümü geri getirebilir.
-3. `https://pikniktube-two.vercel.app/version.txt` adresi `PIKNIKTUP_VERSION=1.6` göstermeli. `https://pikniktube-two.vercel.app/api/status` adresinde `version: 1.6`, `youtubeApiConfigured: true` olmalı.
-4. Vercel → Environment Variables altında `YOUTUBE_API_KEY` bulunmalı. YouTube Data API v3 Google Cloud'da etkin olmalı. Anahtarı koduna ya da GitHub'a koyma.
-5. Müzik klipleri için `/api/youtube?category=Klipler`, Shorts için `/api/youtube?category=Shorts` JSON liste dönmelidir.
+## Neler düzeltildi?
 
-**SQL dosyaları bu pakette yok.** YouTube akışı Supabase'den bağımsızdır; Pikniktüp kullanıcı yüklemeleri için mevcut Supabase tabloları yine gereklidir. SQL dosyasını GitHub'dan silmek Supabase tablolarını silmez.
+- Arama, her karakterde çalışmaz; kullanıcı Enter'a bastığında ya da arama simgesine tıkladığında başlar.
+- `search.list` çağrılarını varsayılan yolda kullanmaz; YouTube'un **günlük arama kotasını tüketmez**.
+- Sunucu sonuçları, hem CDN hem de kısa süreli bellekte önbelleklenir. Aynı anda gelen aynı sorgu istekleri birleştirilir.
+- Bozuk Invidious sunucusuna aynı anda çok fazla istek göndermez; iki sunucu sınırından sonra anlaşılır hata ve bekleme süresi bildirir.
+- Resmî YouTube Data API anahtarı verilmişse popüler videolar ve video ayrıntıları eskisi gibi çalışır; verilmemişse bunlarda da Invidious'a geçebilir.
+- Kullanıcının `id`, `search`, `pageToken` parametreleri doğrulanır; anahtarlar frontend'e sızdırılmaz; video ID ve resim URL'leri güvenli biçimde oluşturulur.
+- Arama sonucu dönmese bile arayüz, mevcut Pikniktüp içeriğini ve kategorileri korur.
 
-**Test sınırı:** Resmî YouTube API ve kullanıcıya ait canlı Supabase hesap anahtarıyla doğrudan test yapılmadı. Tarayıcı etkileşimleri ve sahte YouTube API yanıtlarıyla kontrol edilmiştir. Aramalarda API kota maliyeti ve bölgesel erişim etkili olabilir.
+## Önemli gerçekler
+
+**Bu paket canlıda çalışacağı garantili, ücretli bir video arama servisi sağlamaz.** Genel Invidious sunucuları zaman zaman yanıt vermeyebilir, kullanıcı veya sunucu bazlı istek sınırı koyabilir ya da YouTube değişiklikleri nedeniyle aramayı kaybedebilir. Daha güvenilir üretim sistemi için kendi yönetilen bir Invidious sunucusu veya kota tahsisi yapılmış resmî API gerekir. Paket, belgelenmiş API sözleşmelerine göre geliştirildi ve testler ağ yerine taklit edilmiş yanıtlarla çalıştırıldı; gerçek Vercel dağıtımında test edilmesi gerekir.
+
+Arama sonuçlarındaki oynatılabilirlik, resmî YouTube embed izinlerine bağlıdır. Invidious arama yanıtları oynatılabilirlik bayrağı sağlamadığı için bazı videolar sonradan YouTube tarafından engellenebilir. Klipler sekmesindeki kapak görseli filtrelemesi yalnızca başlık/kanal üzerinden tahmin yürütür.
+
+**Test:** Node.js 20+ varsa `node --test tests/youtube.test.js` komutunu çalıştırabilirsin (10 test).
+
+**Teşhis:** `/api/youtube?health=1`, `/api/status`, Vercel → Logs. `X-Pikniktup-Cache` başlığı `MISS`, `HIT` veya `STALE` olabilir. Kesintilerde kullanıcıya şifre/anahtar istemeden hata kodu verilir.
+
+Kaynaklar: https://docs.invidious.io/api/ ve https://docs.invidious.io/instances/ . Bu sürüm üçüncü taraf servislerle resmî YouTube ortaklığı iddiasında bulunmaz.

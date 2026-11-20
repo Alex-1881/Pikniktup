@@ -1,73 +1,323 @@
-/* Pikniktüp 1.6 — YouTube Data API v3 server-side gateway.
-   Only YouTube's official embedded player is used for video playback.
-   Set YOUTUBE_API_KEY in Vercel server environment, never in frontend code. */
+/* Pikniktüp v1.7.1 — server-side YouTube/Invidious discovery gateway.
+ * Preserves the v1.6 frontend contract: /api/youtube?category=&search=&pageToken=&id=.
+ * Search defaults to Invidious; the official YouTube API is used for trending / details.
+ * No API key is ever returned to the browser or forwarded to Invidious.
+ * Public Invidious instances can be unreliable; self-hosting is recommended for production.
+ */
 'use strict';
-const ENDPOINT='https://www.googleapis.com/youtube/v3/';
-const categoryIds=Object.freeze({'Müzik':'10','Şarkılar':'10','Oyun':'20','Komedi':'23','Eğlence':'24','Film/Dizi':'1','Spor':'17','Eğitim':'27','Teknoloji':'28','Yaşam':'22','Haber':'25'});
-const regexId=/^[A-Za-z0-9_-]{11}$/;
-const regexPage=/^[A-Za-z0-9_-]{1,180}$/;
-const asText=(x,n=100)=>String(x||'').slice(0,n);
-const isVideo=x=>x?.status?.embeddable===true && x?.status?.privacyStatus==='public' && regexId.test(x?.id);
-const durationSecs=x=>{const m=/^P(?:([0-9]+)D)?T?(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)S)?$/.exec(String(x||''));return m?Number(m[1]||0)*86400+Number(m[2]||0)*3600+Number(m[3]||0)*60+Number(m[4]||0):0};
-function normalize(v){const s=v.snippet||{},th=s.thumbnails||{};
- return {id:'youtube:'+v.id,youtube:true,demo:true,owner_id:'youtube',youtube_id:v.id,title:asText(s.title,210),description:asText(s.description,2500),author:asText(s.channelTitle||'YouTube kanalı',150),channel_id:s.channelId||'',category:'YouTube',is_short:durationSecs(v.contentDetails?.duration)>0&&durationSecs(v.contentDetails?.duration)<=60,duration_seconds:durationSecs(v.contentDetails?.duration),views:Number(v.statistics?.viewCount||0),likes_count:Number(v.statistics?.likeCount||0),comments_count:Number(v.statistics?.commentCount||0),created_at:s.publishedAt||'',thumb_url:th.maxres?.url||th.standard?.url||th.high?.url||th.medium?.url||`https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,source_page:`https://www.youtube.com/watch?v=${v.id}`};
-}
-async function youtube(endpoint,args,key){const qs=new URLSearchParams(args);qs.set('key',key);const ctrl=new AbortController();const tm=setTimeout(()=>ctrl.abort(),9500);
- try{const response=await fetch(ENDPOINT+endpoint+'?'+qs,{signal:ctrl.signal,headers:{Accept:'application/json'}});const payload=await response.json().catch(()=>({}));if(!response.ok){const reason=payload?.error?.errors?.[0]?.reason||'';const error=new Error(reason||'YouTube servisi yanıt vermiyor');error.status=response.status;error.reason=reason;throw error;}return payload;}finally{clearTimeout(tm)}
-}
-module.exports=async function handler(req,res){
- if(req.method!=='GET'){res.setHeader('Allow','GET');return res.status(405).json({error:'Sadece GET desteklenir'});}
- const key=process.env.YOUTUBE_API_KEY;
- if(!key)return res.status(503).json({error:'YouTube anahtarı eksik',code:'YOUTUBE_KEY_MISSING',message:'Vercel → Environment Variables → YOUTUBE_API_KEY eklenmeli.'});
- const q=req.query||{};
- const videoId=typeof q.id==='string'&&regexId.test(q.id)?q.id:null;
- const search=asText(q.search,75).normalize('NFKC').trim();
- const specialties=['Klipler','Canlı','Shorts'];
- const category=typeof q.category==='string'&&(categoryIds[q.category]||specialties.includes(q.category))?q.category:'Karışık';
- const pageToken=typeof q.pageToken==='string'&&regexPage.test(q.pageToken)?q.pageToken:'';
- if(q.id&&!videoId)return res.status(400).json({error:'Geçersiz YouTube video kimliği'});
- if(q.search&&search.length<2)return res.status(400).json({error:'Arama için en az 2 karakter gerekli'});
- if(q.pageToken&&!pageToken)return res.status(400).json({error:'Geçersiz sayfa belirteci'});
- res.setHeader('Cache-Control','public, s-maxage=300, stale-while-revalidate=1800');
- try{
-  const fields={part:'snippet,contentDetails,statistics,status',maxResults:videoId?'1':'24'};
-  if(videoId){const data=await youtube('videos',{...fields,id:videoId},key);const item=(data.items||[]).filter(isVideo).map(normalize)[0]||null;return res.status(200).json({item,items:item?[item]:[],has_more:false,source:'YouTube'});}
-  let data;
-  if(search||['Film/Dizi','Klipler','Canlı','Shorts'].includes(category)){
-   const searchTerms={'Film/Dizi':'dizi resmi kanal bölüm fragman','Klipler':'resmi klip official music video','Canlı':'canlı performans live concert','Shorts':'#shorts Türkiye'};
-   let term=search||searchTerms[category]||'';
-   if(search&&category==='Klipler')term+=' official music video klip';
-   else if(search&&category==='Canlı')term+=' live performance';
-   else if(search&&category==='Shorts')term+=' #shorts';
-   const args={part:'snippet',type:'video',maxResults:'30',q:term,regionCode:'TR',relevanceLanguage:'tr',safeSearch:'strict',videoEmbeddable:'true',videoSyndicated:'true'};
-   if(category==='Klipler'||category==='Canlı')args.videoCategoryId='10';
-   if(category==='Shorts')args.videoDuration='short';
-   if(pageToken)args.pageToken=pageToken;
-   const results=await youtube('search',args,key);
-   const ids=(results.items||[]).map(it=>it.id?.videoId).filter(id=>regexId.test(id));
-   if(!ids.length)return res.status(200).json({items:[],has_more:false,next_page_token:'',source:'YouTube'});
-   const details=await youtube('videos',{...fields,id:ids.join(','),maxResults:String(ids.length)},key);
-   const byId=new Map((details.items||[]).filter(isVideo).map(v=>[v.id,v]));
-   let candidates=ids.map(id=>byId.get(id)).filter(Boolean);
-   if(category==='Klipler'){
-    // Reject recognizable static-cover / autogenerated audio, lyrics and visualizers.
-    // Metadata is heuristic: it cannot verify the visual content of every clip.
-    candidates=candidates.filter(v=>!/(official\s*audio|audio\s*only|lyric(?:s)?\s*video|sözleri|visuali[sz]er|\btopic\b|full\s*album|albümün\s*tamamı)/i.test(String(v.snippet?.title||'')+' '+String(v.snippet?.channelTitle||'')));
-   }
-   if(category==='Shorts')candidates=candidates.filter(v=>{const d=durationSecs(v.contentDetails?.duration);return d>0&&d<=180});
-   data={items:candidates,nextPageToken:results.nextPageToken||''};
-  }else{
-   const args={...fields,chart:'mostPopular',regionCode:'TR'};
-   if(categoryIds[category])args.videoCategoryId=categoryIds[category];
-   if(pageToken)args.pageToken=pageToken;
-   data=await youtube('videos',args,key);
+
+const VERSION = '1.7.1';
+const YOUTUBE_API = 'https://www.googleapis.com/youtube/v3/';
+const OFFICIAL_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://yt.chocolatemoo53.com',
+  'https://invidious.tiekoetter.com'
+];
+// The hosts above are from the Invidious maintainers' official instance list.
+// Availability must be checked at deployment time; it is not guaranteed.
+const CATEGORIES = Object.freeze({
+  'Müzik': '10', 'Şarkılar': '10', 'Oyun': '20', 'Komedi': '23',
+  'Eğlence': '24', 'Film/Dizi': '1', 'Spor': '17',
+  'Eğitim': '27', 'Teknoloji': '28', 'Yaşam': '22', 'Haber': '25'
+});
+const SPECIAL = new Set(['Klipler', 'Canlı', 'Shorts']);
+const SEARCH_TERMS = Object.freeze({
+  'Film/Dizi': 'dizi resmi kanal fragman',
+  'Klipler': 'resmi müzik klipleri official music video',
+  'Canlı': 'canlı müzik performansı live concert',
+  'Shorts': '#shorts Türkiye',
+  'Müzik': 'müzik Türkiye', 'Şarkılar': 'yeni şarkılar Türkiye',
+  'Oyun': 'oyun Türkiye', 'Komedi': 'komedi Türkiye',
+  'Eğlence': 'eğlence Türkiye', 'Spor': 'spor Türkiye',
+  'Eğitim': 'eğitim Türkiye', 'Teknoloji': 'teknoloji Türkiye',
+  'Yaşam': 'vlog Türkiye', 'Haber': 'haber Türkiye'
+});
+const ID_OK = /^[A-Za-z0-9_-]{11}$/;
+const YT_TOKEN_OK = /^[A-Za-z0-9_-]{1,180}$/;
+const INV_TOKEN_OK = /^iv_([1-9][0-9]{0,2})$/;
+const STATIC_AUDIO = /(official\s*audio|audio\s*only|lyric(?:s)?\s*video|sözleri|visuali[sz]er|\btopic\b|full\s*album|albümün\s*tamamı)/i;
+const CACHE_MAX = 180;
+const cache = new Map();
+const inflight = new Map();
+const hostCooldown = new Map();
+
+const cut = (v, length=200) => String(v ?? '').slice(0, length);
+const finite = n => Math.max(0, Math.min(1e12, Number.isFinite(Number(n)) ? Number(n) : 0));
+const isId = id => typeof id === 'string' && ID_OK.test(id);
+
+function timestamp(value) {
+  if (typeof value === 'string' && value) {
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? new Date(time).toISOString() : '';
   }
-  let result=(data.items||[]).filter(isVideo);
-  if(category==='Karışık'&&!search)result=result.filter(v=>!/(official\s*audio|audio\s*only|\btopic\b|lyric(?:s)?\s*video)/i.test(String(v.snippet?.title||'')+' '+String(v.snippet?.channelTitle||'')));
-  const items=result.map(normalize);
-  return res.status(200).json({items,has_more:Boolean(data.nextPageToken),next_page_token:data.nextPageToken||'',source:'YouTube',category});
- }catch(err){console.warn('YouTube API:',err.status||'network',err.reason||err.message);const status=err.status===403?503:502;
-  const message=err.status===403?'YouTube API anahtarı, kota veya izin sorunu. Google Cloud ayarlarını kontrol et.':'YouTube bağlantısı geçici olarak kurulamadı.';
-  return res.status(status).json({error:message,code:err.status===403?'YOUTUBE_API_DENIED':'YOUTUBE_API_ERROR'});
- }
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 1100000000 || seconds > 4400000000) return '';
+  return new Date(seconds * 1000).toISOString();
+}
+function duration(s) {
+  const m = /^P(?:([0-9]+)D)?T?(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)S)?$/.exec(String(s || ''));
+  return m ? Number(m[1] || 0) * 86400 + Number(m[2] || 0) * 3600 + Number(m[3] || 0) * 60 + Number(m[4] || 0) : 0;
+}
+function shape(id, metadata={}) {
+  const secs = finite(metadata.duration);
+  return {
+    id: `youtube:${id}`, youtube: true, demo: true, owner_id: 'youtube', youtube_id: id,
+    title: cut(metadata.title || 'YouTube videosu', 210),
+    description: cut(metadata.description, 2500),
+    author: cut(metadata.author || 'YouTube kanalı', 150),
+    channel_id: cut(metadata.channelId, 150),
+    category: 'YouTube', is_short: secs > 0 && secs <= 180, duration_seconds: secs,
+    views: finite(metadata.views), likes_count: finite(metadata.likes),
+    comments_count: finite(metadata.comments), created_at: timestamp(metadata.published),
+    thumb_url: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+    source_page: `https://www.youtube.com/watch?v=${id}`
+  };
+}
+function fromInvidious(item) {
+  if (!item || (item.type && item.type !== 'video') || !isId(item.videoId)) return null;
+  return shape(item.videoId, {
+    title: item.title, author: item.author, channelId: item.authorId,
+    description: item.description, duration: item.lengthSeconds,
+    views: item.viewCount, likes: item.likeCount, comments: item.commentCount,
+    published: item.published
+  });
+}
+function fromYouTube(item) {
+  if (!item || !isId(item.id) || item.status?.privacyStatus !== 'public' || item.status?.embeddable !== true) return null;
+  const s = item.snippet || {};
+  return shape(item.id, {
+    title: s.title, description: s.description, author: s.channelTitle,
+    channelId: s.channelId, duration: duration(item.contentDetails?.duration),
+    views: item.statistics?.viewCount, likes: item.statistics?.likeCount,
+    comments: item.statistics?.commentCount, published: s.publishedAt
+  });
+}
+function normalizeResults(items, category) {
+  const ids = new Set();
+  return (Array.isArray(items) ? items : []).map(item => item).filter(v => {
+    if (!v || ids.has(v.youtube_id)) return false;
+    if (category === 'Klipler' && STATIC_AUDIO.test(v.title + ' ' + v.author)) return false;
+    if (category === 'Shorts' && !(v.duration_seconds > 0 && v.duration_seconds <= 180)) return false;
+    if (category === 'Karışık' && STATIC_AUDIO.test(v.title + ' ' + v.author)) return false;
+    ids.add(v.youtube_id);
+    return true;
+  });
+}
+function apiError(message, code, status=503, wait=0) {
+  const error = new Error(message);
+  error.code = code; error.status = status; error.wait = wait;
+  return error;
+}
+async function fetchJson(url, ms=6500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    const response = await fetch(url.toString(), {
+      signal: controller.signal, redirect: 'error',
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Pikniktup/1.7' }
+    });
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      const reason = cut(json?.error?.errors?.[0]?.reason || json?.error?.message || (typeof json?.error === 'string' ? json.error : ''), 90);
+      const waitHeader = Number(response.headers.get('retry-after'));
+      const wait = response.status === 429 ? Math.max(60, Math.min(600, Number.isFinite(waitHeader) && waitHeader > 0 ? waitHeader : 120)) : 0;
+      throw apiError(reason || `HTTP ${response.status}`, response.status === 429 ? 'UPSTREAM_RATE_LIMIT' : 'UPSTREAM_ERROR', response.status, wait);
+    }
+    if (json === null || typeof json !== 'object') throw apiError('Geçersiz API cevabı', 'INVALID_RESPONSE', 502);
+    return json;
+  } catch (error) {
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') throw apiError('API yanıt vermedi (zaman aşımı)', 'UPSTREAM_TIMEOUT', 504);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function ytFetch(endpoint, params, key) {
+  const url = new URL(endpoint, YOUTUBE_API);
+  Object.entries(params).forEach(([name,value]) => url.searchParams.set(name, String(value)));
+  url.searchParams.set('key', key);
+  return fetchJson(url, 8500);
+}
+function safeHost(raw) {
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '') || url.port) return null;
+    const host = url.hostname.toLowerCase();
+    if (!/^[a-z0-9.-]+$/.test(host) || !host.includes('.') || host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal') || /^[0-9.]+$/.test(host) || host.includes('..')) return null;
+    return url.origin;
+  } catch { return null; }
+}
+function instances() {
+  const raw = process.env.INVIDIOUS_INSTANCES;
+  // Optional override: comma-separated HTTPS origins. Blank => maintained defaults.
+  const list = raw && raw.trim() ? raw.split(',') : OFFICIAL_INSTANCES;
+  return [...new Set(list.map(safeHost).filter(Boolean))].slice(0, 5);
+}
+function pageForInvidious(pageToken) {
+  if (!pageToken) return 1;
+  const match = INV_TOKEN_OK.exec(pageToken);
+  return match ? Number(match[1]) : 1;
+}
+function userSearchTerm(search, category) {
+  if (!search) return SEARCH_TERMS[category] || '';
+  if (category === 'Klipler') return `${search} official music video klip`;
+  if (category === 'Canlı') return `${search} live performance`;
+  if (category === 'Shorts') return `${search} #shorts`;
+  return search;
+}
+async function tryInvidious(path, params, expected='array') {
+  const available = instances();
+  if (!available.length) throw apiError('Alternatif video sunucusu ayarlanmamış.', 'INVIDIOUS_NOT_CONFIGURED');
+  const now = Date.now();
+  const ready = available.filter(host => (hostCooldown.get(host) || 0) <= now);
+  if (!ready.length) {
+    const soonest = Math.min(...available.map(host => hostCooldown.get(host) || now));
+    throw apiError('Alternatif sunucular kısa süreliğine sınırlandırıldı.', 'INVIDIOUS_RATE_LIMIT', 429, Math.max(30, Math.ceil((soonest-now)/1000)));
+  }
+  let lastError;
+  // Maximum two upstream hosts per request; do not hammer public instances.
+  for (const host of ready.slice(0, 2)) {
+    try {
+      const url = new URL(path, host);
+      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, String(v)));
+      const data = await fetchJson(url, 5500);
+      if (expected === 'array' ? !Array.isArray(data) : Array.isArray(data) || !data.videoId) throw apiError('Sunucudan beklenmeyen veri geldi.', 'INVALID_RESPONSE', 502);
+      hostCooldown.delete(host);
+      return data;
+    } catch (e) {
+      lastError = e;
+      const secs = e.status === 429 ? Math.max(120, e.wait || 120) : 45;
+      hostCooldown.set(host, Date.now() + secs * 1000);
+      console.warn('[Pikniktup] Invidious unavailable:', new URL(host).hostname, e.status || e.code || 'network');
+    }
+  }
+  throw apiError('Alternatif arama sunucuları şu an yanıt vermiyor. Biraz sonra yeniden dene.', 'INVIDIOUS_UNAVAILABLE', 503, lastError?.status === 429 ? Math.max(60, lastError.wait || 120) : 45);
+}
+async function invidiousSearch(term, category, page) {
+  const results = await tryInvidious('/api/v1/search', {q: term, type: 'video', region: 'TR', page, sort_by: 'relevance'});
+  const items = normalizeResults(results.map(fromInvidious).filter(Boolean), category);
+  return {
+    items, has_more: results.length >= 20 && page < 100,
+    next_page_token: results.length >= 20 && page < 100 ? `iv_${page + 1}` : '',
+    source: 'Invidious', category
+  };
+}
+async function invidiousTrending(category) {
+  if (category !== 'Karışık') return invidiousSearch(userSearchTerm('', category), category, 1);
+  const results = await tryInvidious('/api/v1/trending', {region: 'TR'});
+  return {items: normalizeResults(results.map(fromInvidious).filter(Boolean), category), has_more:false, next_page_token:'', source:'Invidious', category};
+}
+async function invidiousDetails(id) {
+  const video = await tryInvidious(`/api/v1/videos/${id}`, {}, 'object');
+  const item = fromInvidious(video);
+  return {item, items:item?[item]:[],has_more:false,source:'Invidious'};
+}
+async function officialDetails(id, key) {
+  const response = await ytFetch('videos', {part:'snippet,contentDetails,statistics,status',id}, key);
+  const item = (response.items || []).map(fromYouTube).find(Boolean) || null;
+  return {item,items:item?[item]:[],has_more:false,source:'YouTube'};
+}
+async function officialTrending(category, pageToken, key) {
+  const params = {part:'snippet,contentDetails,statistics,status',chart:'mostPopular',regionCode:'TR',maxResults: '24'};
+  if (CATEGORIES[category]) params.videoCategoryId = CATEGORIES[category];
+  if (pageToken) params.pageToken = pageToken;
+  const data = await ytFetch('videos', params, key);
+  const items = normalizeResults((data.items || []).map(fromYouTube).filter(Boolean), category);
+  return {items, has_more: Boolean(data.nextPageToken),next_page_token: data.nextPageToken || '',source:'YouTube',category};
+}
+
+function readCache(key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.staleUntil < Date.now()) { cache.delete(key); return null; }
+  return entry;
+}
+async function cached(key, loader, seconds=600) {
+  const existing = readCache(key);
+  if (existing && existing.freshUntil >= Date.now()) return {payload:existing.payload,cache:'HIT'};
+  if (inflight.has(key)) return inflight.get(key);
+  const promise = (async () => {
+    try {
+      const payload = await loader();
+      if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+      cache.set(key, {payload, freshUntil:Date.now()+seconds*1000,staleUntil:Date.now()+(seconds+3600)*1000});
+      return {payload,cache:'MISS'};
+    } catch (error) {
+      if (existing) return {payload:{...existing.payload,warning:'STALE_FALLBACK'},cache:'STALE'};
+      throw error;
+    } finally { inflight.delete(key); }
+  })();
+  inflight.set(key, promise);
+  return promise;
+}
+function respondError(res, error) {
+  const known = new Set(['INVIDIOUS_UNAVAILABLE','INVIDIOUS_NOT_CONFIGURED','INVIDIOUS_RATE_LIMIT','VIDEO_SOURCE_UNAVAILABLE']);
+  const code = known.has(error.code) || error.code === 'INVALID_PAGE' ? error.code : 'VIDEO_SOURCE_UNAVAILABLE';
+  const wait = Math.max(0, Math.min(600, Math.ceil(error.wait || 0)));
+  const status = error.status === 400 ? 400 : error.status === 429 ? 429 : 503;
+  if (wait) res.setHeader('Retry-After', String(wait));
+  res.setHeader('Cache-Control', 'no-store');
+  console.warn('[Pikniktup] API request failed:', error.code || 'network', error.status || '');
+  return res.status(status).json({
+    error: code === 'INVALID_PAGE' ? 'Sayfa belirteci eski veya geçersiz. İlk sayfaya dön.' : code === 'INVIDIOUS_NOT_CONFIGURED'
+      ? 'Arama sunucusu ayarlanmamış. Vercel INVIDIOUS_INSTANCES ayarını kontrol et.'
+      : 'Video kaynağı şu anda yanıt vermiyor. Biraz sonra yeniden dene.',
+    code, retry_after_seconds: wait
+  });
+}
+
+module.exports = async function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.setHeader('Allow','GET');
+    return res.status(405).json({error:'Yalnızca GET kullanılabilir',code:'METHOD_NOT_ALLOWED'});
+  }
+  if (req.query?.health === '1') {
+    res.setHeader('Cache-Control','no-store');
+    return res.status(200).json({version:VERSION, engine:'Invidious search + YouTube trending',invidiousConfigured:instances().length > 0,youtubeKeyConfigured:Boolean(process.env.YOUTUBE_API_KEY)});
+  }
+  const query = req.query || {};
+  const id = query.id;
+  const requestedSearch = query.search;
+  if (id !== undefined && !isId(id)) return res.status(400).json({error:'Geçersiz video kimliği',code:'INVALID_ID'});
+  if (requestedSearch !== undefined && typeof requestedSearch !== 'string') return res.status(400).json({error:'Geçersiz arama',code:'INVALID_SEARCH'});
+  const search = cut(requestedSearch,75).normalize('NFKC').replace(/[\u0000-\u001F\u007F]/g,' ').trim();
+  if (requestedSearch !== undefined && search.length < 2) return res.status(400).json({error:'En az iki karakter yaz',code:'SEARCH_TOO_SHORT'});
+  const category = typeof query.category === 'string' && (CATEGORIES[query.category] || SPECIAL.has(query.category)) ? query.category : 'Karışık';
+  const pageToken = typeof query.pageToken === 'string' ? query.pageToken : '';
+  if (query.pageToken !== undefined && (!pageToken || (!INV_TOKEN_OK.test(pageToken) && !YT_TOKEN_OK.test(pageToken)))) {
+    return res.status(400).json({error:'Geçersiz sayfa belirteci',code:'INVALID_PAGE'});
+  }
+  // CDN caching is cross-invocation; the in-process cache additionally coalesces concurrent requests.
+  res.setHeader('Cache-Control','public, s-maxage=600, stale-while-revalidate=1800');
+  const key = process.env.YOUTUBE_API_KEY;
+  const mode = id ? 'details' : search || SPECIAL.has(category) || category === 'Film/Dizi' || INV_TOKEN_OK.test(pageToken) ? 'search' : 'trending';
+  const cacheKey = JSON.stringify([mode,id||'',search,category,pageToken]);
+  try {
+    const {payload,cache:cacheLabel} = await cached(cacheKey, async () => {
+      if (mode === 'search') {
+        const term = userSearchTerm(search,category);
+        if (INV_TOKEN_OK.test(pageToken) || !pageToken) return invidiousSearch(term,category,pageForInvidious(pageToken));
+        // Search pagination from old Google versions is unsupported after migration.
+        throw apiError('Eski arama sayfası belirteci', 'INVALID_PAGE',400);
+      }
+      if (mode === 'details') {
+        if (key) {
+          try { return await officialDetails(id,key); }
+          catch (e) { console.warn('[Pikniktup] YouTube details fallback:',e.status||e.code); }
+        }
+        return invidiousDetails(id);
+      }
+      if (key && !INV_TOKEN_OK.test(pageToken)) {
+        try { return await officialTrending(category,pageToken,key); }
+        catch (e) { console.warn('[Pikniktup] YouTube trending fallback:',e.status||e.code); }
+      }
+      if (pageToken) throw apiError('Alternatif kaynak, bu sayfayı desteklemiyor', 'INVALID_PAGE',400);
+      return invidiousTrending(category);
+    }, mode === 'search' ? 900 : mode === 'details' ? 900 : 600);
+    res.setHeader('X-Pikniktup-Cache',cacheLabel);
+    return res.status(200).json(payload);
+  } catch (error) {
+    return respondError(res,error);
+  }
 };
