@@ -1,4 +1,4 @@
-# Pikniktüp v1.7.1 — Daha sağlam arama
+# Pikniktüp v1.7.2 — Daha sağlam arama
 
 Pikniktüp v1.6'nın görünümünü ve özelliklerini koruyan yükseltme. **Arama Invidious üzerinden yapılır**, ana sayfa popüler videoları ve ayrıntılar için ise (yapılandırılmışsa) resmî **YouTube Data API v3** kullanılır. Video oynatma yine resmî YouTube gömme oynatıcısıyladır.
 
@@ -8,7 +8,7 @@ Pikniktüp v1.6'nın görünümünü ve özelliklerini koruyan yükseltme. **Ara
 2. Vercel'de projenin **Settings → Environment Variables** bölümünü aç. Eskiden kullandığın `YOUTUBE_API_KEY`, `SUPABASE_URL` ve `SUPABASE_ANON_KEY` değişkenlerini aynı şekilde bırak. **Anahtarları `index.html` içine yazma.**
 3. **INVIDIOUS_INSTANCES isteğe bağlıdır.** Ayarlamazsan bu sürüm, Invidious'un resmî olarak listelenen dört genel HTTPS sunucusunu dener. Kendi erişilebilir sunucun varsa örneğin `https://senin-invidious-sunucun.example` biçiminde; birden çoksa virgülle ayırarak bu değişkene yazabilirsin. Sadece kök adresleri kullan; `/api/v1` ekleme.
 4. Vercel'de **Deployments → Redeploy** yap (veya GitHub'a yeni commit göndererek otomatik dağıtım yapılmasını bekle).
-5. `https://SITEN.vercel.app/api/youtube?health=1` sayfasında `version: 1.7.1` gör. Ardından normal sitede `lvbel c5` arayıp **Enter** veya arama simgesine bas.
+5. `https://SITEN.vercel.app/api/youtube?health=1` sayfasında `version: 1.7.2` gör. Ardından normal sitede `lvbel c5` arayıp **Enter** veya arama simgesine bas.
 
 ## Neler düzeltildi?
 
@@ -31,3 +31,14 @@ Arama sonuçlarındaki oynatılabilirlik, resmî YouTube embed izinlerine bağl�
 **Teşhis:** `/api/youtube?health=1`, `/api/status`, Vercel → Logs. `X-Pikniktup-Cache` başlığı `MISS`, `HIT` veya `STALE` olabilir. Kesintilerde kullanıcıya şifre/anahtar istemeden hata kodu verilir.
 
 Kaynaklar: https://docs.invidious.io/api/ ve https://docs.invidious.io/instances/ . Bu sürüm üçüncü taraf servislerle resmî YouTube ortaklığı iddiasında bulunmaz.
+
+
+## 1.7.2 arama kurtarma (önemli)
+
+- `api/youtube.js` artık Invidious başarısız olduğunda **resmî YouTube Data API v3 aramasını** yedek olarak deneyebilir.
+- Google Search API günlük kotanız hâlâ doluysa arama **hemen çalışmayacaktır**. Yeni API anahtarı aynı projenin kotasını yenilemez.
+- Yedek API araması kullanıcı aramaları için `search.list` kullanır; Google API kotası tüketir.
+- Vercel `YOUTUBE_API_KEY` mevcutsa kullanılır; istemciye gönderilmez.
+- Bot kontrolü uygulayan veya API erişimini kapatan Invidious sunucuları için sorunsuz sonuç vaat edilmez.
+- İlk arama testi için `?category=Kar%C4%B1%C5%9F%C4%B1k&search=lvbel%20c5` kullanın.
+- Tarayıcıda arama sadece Enter ile gönderilir; eski dosyaları tümüyle değiştirmeden kurulum için yalnızca API ZIP'ini yükleyin.
